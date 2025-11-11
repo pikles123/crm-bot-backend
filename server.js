@@ -44,7 +44,7 @@ function parseMondayPhoneColumn(col) {
 async function sendWhatsAppMessage(to, body) {
   return client.messages.create({
     from: process.env.TWILIO_PHONE_NUMBER,
-    to: `whatsapp:${telefono}`,
+    to: `whatsapp:${phone}`,
     body: mensaje,
   });
 }
@@ -280,6 +280,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
+
 
 
 
