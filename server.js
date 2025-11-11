@@ -9,68 +9,51 @@ import axios from "axios";
 
 dotenv.config();
 
-console.log("✅ Verificando variables de entorno...");
-console.log("TWILIO_ACCOUNT_SID:", process.env.TWILIO_ACCOUNT_SID || "(no definido)");
-console.log("TWILIO_AUTH_TOKEN:", process.env.TWILIO_AUTH_TOKEN ? "(definido)" : "(no definido)");
-console.log("TWILIO_PHONE_NUMBER:", process.env.TWILIO_PHONE_NUMBER || "(no definido)");
-console.log("MONDAY_API_TOKEN:", process.env.MONDAY_API_TOKEN ? "(definido)" : "(no definido)");
+console.log("✅ Verificando variables de entorno de Twilio...");
+console.log("TWILIO_ACCOUNT_SID:", process.env.TWILIO_ACCOUNT_SID);
+console.log("TWILIO_PHONE_NUMBER:", process.env.TWILIO_PHONE_NUMBER);
 
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // --- TWILIO CLIENT ---
-if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
-  console.error("❌ Faltan credenciales de Twilio. Configura TWILIO_ACCOUNT_SID y TWILIO_AUTH_TOKEN en tu .env");
-}
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-// --- CONVERSACIONES EN MEMORIA ---
-const conversations = {}; // key = "whatsapp:+569..." -> { step: number, data: {...} }
+// --- ESTADO TEMPORAL DE CONVERSACIONES ---
+const conversations = {}; // key = "whatsapp:+569..." → { step: number, data: {...} }
 
-// --- HELPER: PARSEAR COLUMNA DE TELÉFONO DE MONDAY ---
+// --- HELPERS ---
 function parseMondayPhoneColumn(col) {
   try {
     if (!col) return null;
-
-    // Si es JSON dentro de "value"
     if (col.value) {
       const parsed = typeof col.value === "string" ? JSON.parse(col.value) : col.value;
       if (parsed?.phone) return parsed.phone;
     }
-
-    // Si tiene texto plano
-    if (col.text && typeof col.text === "string" && col.text.trim() !== "") {
-      return col.text.trim();
-    }
-
+    if (col.text) return col.text;
     return null;
-  } catch {
-    return col?.text || null;
+  } catch (e) {
+    return col.text || null;
   }
 }
 
-// --- FUNCIÓN PARA ENVIAR MENSAJE WHATSAPP ---
+// --- FUNCION PARA ENVIAR MENSAJES ---
 async function sendWhatsAppMessage(to, body) {
   try {
-    if (!process.env.TWILIO_PHONE_NUMBER) {
-      throw new Error("TWILIO_PHONE_NUMBER no está definido.");
-    }
-    if (!to || !body) {
-      throw new Error(`Parámetros inválidos: to=${to}, body=${body}`);
-    }
+    if (!process.env.TWILIO_PHONE_NUMBER) throw new Error("TWILIO_PHONE_NUMBER no está definido.");
+    if (!to || !body) throw new Error(`Parámetros inválidos: to=${to}, body=${body}`);
 
     console.log(`📤 Enviando WhatsApp a ${to}: "${body}"`);
-
     const msg = await client.messages.create({
-      from: process.env.TWILIO_PHONE_NUMBER, // ejemplo: whatsapp:+14155238886
+      from: process.env.TWILIO_PHONE_NUMBER, // Ej: whatsapp:+14155238886
       to,
       body,
     });
 
     console.log(`✅ Mensaje enviado correctamente (SID: ${msg.sid})`);
   } catch (err) {
-    console.error("❌ Error enviando WhatsApp:", err.message);
+    console.error("❌ Error enviando mensaje WhatsApp:", err.message);
   }
 }
 
@@ -82,12 +65,7 @@ app.get("/", (req, res) => {
 // --- WEBHOOK DESDE MONDAY ---
 app.post("/monday-webhook", async (req, res) => {
   console.log("📩 Webhook recibido desde Monday:", JSON.stringify(req.body, null, 2));
-
-  // Challenge de verificación
-  if (req.body.challenge) {
-    return res.status(200).send({ challenge: req.body.challenge });
-  }
-
+  if (req.body.challenge) return res.status(200).send({ challenge: req.body.challenge });
   res.status(200).send("OK");
 
   try {
@@ -97,7 +75,7 @@ app.post("/monday-webhook", async (req, res) => {
     const pulseId = event.pulseId;
     if (!pulseId) throw new Error("No se recibió 'pulseId' desde Monday.");
 
-    // --- Consultar item a Monday ---
+    // --- Consulta a Monday API ---
     const query = `
       query {
         items (ids: ${pulseId}) {
@@ -126,8 +104,6 @@ app.post("/monday-webhook", async (req, res) => {
       return acc;
     }, {});
 
-    console.log("📦 Columnas del item:", Object.keys(columns));
-
     const nombre_cliente = item.name || "Cliente";
     const telefonoRaw =
       parseMondayPhoneColumn(columns["phone_mkxkb8na"]) ||
@@ -150,19 +126,19 @@ app.post("/monday-webhook", async (req, res) => {
     }
 
     const to = `whatsapp:${telefonoClean}`;
-    console.log("📱 Enviando mensajes al número normalizado:", to);
+    console.log("📱 Enviando mensaje inicial al número:", to);
 
-    // --- Guardar conversación ---
-    conversations[to] = { step: 1, data: { nombre_cliente } };
+    // --- Crear conversación en estado inicial ---
+    conversations[to] = { step: 0, data: { nombre_cliente } };
 
-    // --- Mensajes iniciales ---
+    // --- Solo mensaje de bienvenida ---
     await sendWhatsAppMessage(
       to,
       `Hola ${nombre_cliente}! 👋 
 Soy MarIA, tu asistente virtual de Uniflou. Te apoyaré en la gestión de tu Crédito Hipotecario.`
     );
 
-    await sendWhatsAppMessage(to, "1️⃣ Primero, necesito hacerte un par de preguntas. ¿Podrías confirmarme tu RUT?");
+    console.log("✅ Mensaje inicial enviado. Esperando respuesta del cliente...");
   } catch (error) {
     console.error("❌ Error procesando webhook de Monday:", error.message);
   }
@@ -174,22 +150,34 @@ app.post("/whatsapp-webhook", async (req, res) => {
 
   const from = req.body?.From;
   const body = (req.body?.Body || "").trim();
-
   console.log(`💬 Mensaje entrante: from=${from}, body="${body}"`);
   if (!from) return;
 
   if (!conversations[from]) {
-    conversations[from] = { step: 1, data: {} };
+    conversations[from] = { step: 0, data: {} };
   }
 
   const convo = conversations[from];
 
   try {
+    // --- NUEVO FLUJO ---
+    if (convo.step === 0) {
+      convo.step = 1;
+      await sendWhatsAppMessage(
+        from,
+        "1️⃣ Primero, necesito hacerte un par de preguntas. ¿Podrías confirmarme tu RUT?"
+      );
+      return;
+    }
+
     switch (convo.step) {
       case 1:
         convo.data.rut = body;
         convo.step = 2;
-        await sendWhatsAppMessage(from, "2️⃣ ¿Qué tipo de trabajador eres?\n1) Dependiente  2) Independiente  3) Socio Empresa");
+        await sendWhatsAppMessage(
+          from,
+          "2️⃣ ¿Qué tipo de trabajador eres?\n1) Dependiente  2) Independiente  3) Socio Empresa"
+        );
         break;
 
       case 2: {
@@ -255,7 +243,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
         break;
     }
 
-    console.log("🧾 Estado actual conversación:", conversations[from]);
+    console.log("🧾 Estado conversación:", conversations[from]);
   } catch (err) {
     console.error("❌ Error en webhook de Twilio:", err.message);
   }
