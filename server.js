@@ -14,7 +14,7 @@ app.use(bodyParser.json());
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 // --- ESTADO TEMPORAL DE CONVERSACIONES ---
-const conversations = {}; // { telefono: { step: 1, data: {} } }
+const conversations = {}; // { text_mkxk37gb: { step: 1, data: {} } }
 
 // --- WEBHOOK DESDE MONDAY ---
 app.post("/monday-webhook", async (req, res) => {
@@ -181,3 +181,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
+
