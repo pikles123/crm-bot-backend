@@ -3,6 +3,7 @@ import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import twilio from "twilio";
+import axios from "axios";
 
 dotenv.config();
 
@@ -14,7 +15,7 @@ app.use(bodyParser.json());
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 // --- ESTADO TEMPORAL DE CONVERSACIONES ---
-const conversations = {}; // { text_mkxk37gb: { step: 1, data: {} } }
+const conversations = {}; // { telefono: { step: 1, data: {} } }
 
 // --- WEBHOOK DESDE MONDAY ---
 app.post("/monday-webhook", async (req, res) => {
@@ -31,20 +32,58 @@ app.post("/monday-webhook", async (req, res) => {
 
   try {
     const event = req.body?.event || {};
-    const columns = event?.columnValues || {};
+    const itemId = event?.pulseId;
+    const boardId = event?.boardId;
 
-    const nombre_cliente = columns?.nombre_cliente?.text || "Cliente";
-    const telefono = columns?.telefono?.text || null;
-
-    if (!telefono) {
-      console.log("⚠️ No hay teléfono, no se puede iniciar conversación.");
+    if (!itemId || !boardId) {
+      console.log("⚠️ No se encontraron itemId o boardId en el webhook");
       return;
     }
 
-    const to = `whatsapp:${telefono.replace(/\D/g, "")}`;
+    // 1️⃣ Consultar datos del item en Monday para obtener la columna 'telefono'
+    const mondayResponse = await axios.post(
+      "https://api.monday.com/v2",
+      {
+        query: `
+          query {
+            items(ids: [${itemId}]) {
+              name
+              column_values {
+                id
+                text
+              }
+            }
+          }
+        `,
+      },
+      {
+        headers: {
+          Authorization: process.env.MONDAY_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const mondayItem = mondayResponse.data.data.items[0];
+    const nombre_cliente = mondayItem.name || "Cliente";
+
+    // 🔍 Buscar la columna con id = "text_mkxk37gb"
+    const telefonoColumn = mondayItem.column_values.find(
+      (col) => col.id === "text_mkxk37gb"
+    );
+    const telefono = telefonoColumn?.text?.trim();
+
+    if (!telefono) {
+      console.log("⚠️ No hay teléfono disponible, no se puede iniciar conversación.");
+      return;
+    }
+
+    const telefonoLimpio = telefono.replace(/\D/g, "");
+    const to = `whatsapp:${telefonoLimpio}`;
+
     conversations[to] = { step: 1, data: { nombre_cliente } };
 
-    // Mensaje inicial
+    // ✅ Mensaje inicial
     await client.messages.create({
       from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
       to,
@@ -53,15 +92,17 @@ Soy MarIA, tu asistente virtual que te va a apoyar con la gestión de tu crédit
 Lo primero que vamos a hacer es contestar unas preguntas.`,
     });
 
-    // Primera pregunta
+    // ➡️ Primera pregunta
     await client.messages.create({
       from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
       to,
       body: `1️⃣ Me puedes confirmar tu RUT?`,
     });
 
+    console.log(`✅ Conversación iniciada con ${telefono}`);
+
   } catch (err) {
-    console.error("❌ Error procesando webhook:", err.message);
+    console.error("❌ Error procesando webhook de Monday:", err.message);
   }
 });
 
@@ -81,14 +122,12 @@ app.post("/whatsapp-webhook", async (req, res) => {
   const { step, data } = conversation;
 
   switch (step) {
-    // Pregunta 1 - RUT
     case 1:
       data.rut = message;
       conversation.step = 2;
       await sendMessage(from, "2️⃣ Qué tipo de trabajador eres?\n1. Dependiente\n2. Independiente\n3. Socio Empresa");
       break;
 
-    // Pregunta 2 - Tipo de trabajador
     case 2:
       const tipoMap = { "1": "Dependiente", "2": "Independiente", "3": "Socio Empresa" };
       data.tipo_trabajador = tipoMap[message] || message;
@@ -96,26 +135,23 @@ app.post("/whatsapp-webhook", async (req, res) => {
       await sendMessage(from, "3️⃣ ¿Es tu primera vivienda? (Sí / No)");
       break;
 
-    // Pregunta 3 - Primera vivienda
     case 3:
       data.primera_vivienda = message.toLowerCase().includes("sí") ? "Sí" : "No";
       conversation.step = 4;
       await sendMessage(from, "4️⃣ ¿Cuál es el precio de compra de tu propiedad? (en UF)");
       break;
 
-    // Pregunta 4 - Precio
     case 4:
       data.precio_uf = message;
       conversation.step = 5;
       await sendMessage(from, "5️⃣ ¿Es una casa o un departamento?");
       break;
 
-    // Pregunta 5 - Tipo de vivienda
     case 5:
       data.tipo_vivienda = message.toLowerCase().includes("casa") ? "Casa" : "Departamento";
       conversation.step = 6;
 
-      // Enviar documentos según tipo de trabajador
+      // 📄 Documentos según tipo de trabajador
       let docs = "";
       switch (data.tipo_trabajador.toLowerCase()) {
         case "dependiente":
@@ -149,11 +185,10 @@ app.post("/whatsapp-webhook", async (req, res) => {
       await sendMessage(from, `Ahora, vamos a necesitar que me puedas enviar el siguiente listado de documentos:\n${docs}`);
       break;
 
-    // Revisión final (después de que envíe documentos)
     case 6:
       conversation.step = 7;
       await sendMessage(from, `✅ Muchas gracias, todos los documentos están revisados y estaríamos ok para comenzar con el proceso de evaluación crediticia. Estaremos en contacto por mail. Nos vemos! 👋`);
-      delete conversations[from]; // limpiar sesión
+      delete conversations[from];
       break;
 
     default:
@@ -171,7 +206,7 @@ async function sendMessage(to, body) {
   });
 }
 
-// --- HOME (para debug visual) ---
+// --- HOME ---
 app.get("/", (req, res) => {
   res.send("✅ Servidor funcionando correctamente. Ruta raíz activa.");
 });
@@ -181,4 +216,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
-
