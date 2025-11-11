@@ -41,6 +41,17 @@ function parseMondayPhoneColumn(col) {
   }
 }
 
+// Extraer número desde las columnas de Monday
+const phone = itemValues['phone_mkxkb8na']?.phone || itemValues['phone_mkxkb8na'] || null;
+
+// Validar
+if (!phone) {
+  throw new Error("No se encontró número de teléfono en los datos del item");
+}
+
+console.log("📞 Teléfono (raw):", phone);
+
+
 async function sendWhatsAppMessage(to, body) {
   return client.messages.create({
     from: process.env.TWILIO_PHONE_NUMBER,
@@ -280,6 +291,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
+
 
 
 
