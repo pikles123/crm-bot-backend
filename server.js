@@ -134,7 +134,7 @@ app.post("/monday-webhook", async (req, res) => {
     // --- Solo mensaje de bienvenida ---
     await sendWhatsAppMessage(
       to,
-      `Hola ${nombre_cliente}! 👋 
+      `Holaa! 👋 
 Soy MarIA, tu asistente virtual de Uniflou. Te apoyaré en la gestión de tu Crédito Hipotecario.`
     );
 
@@ -254,3 +254,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
+
