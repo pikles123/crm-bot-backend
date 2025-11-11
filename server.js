@@ -8,10 +8,9 @@ import axios from "axios";
 
 dotenv.config();
 
-console.log("✅ Variables Twilio:");
-console.log("SID:", process.env.TWILIO_ACCOUNT_SID);
-console.log("AUTH TOKEN:", process.env.TWILIO_AUTH_TOKEN ? "Cargado ✅" : "No cargado ❌");
-console.log("PHONE:", process.env.TWILIO_PHONE_NUMBER);
+console.log("✅ Verificando variables de entorno de Twilio...");
+console.log("TWILIO_ACCOUNT_SID:", process.env.TWILIO_ACCOUNT_SID);
+console.log("TWILIO_PHONE_NUMBER:", process.env.TWILIO_PHONE_NUMBER);
 
 const app = express();
 app.use(bodyParser.json());
@@ -281,4 +280,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
+
 
