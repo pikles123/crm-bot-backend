@@ -144,11 +144,10 @@ app.post("/monday-webhook", async (req, res) => {
     await sendWhatsAppMessage(
       to,
       `Hola ${nombre_cliente}! 👋 
-Soy MarIA, tu asistente virtual que te apoyará con la gestión de tu crédito hipotecario. 
-Primero necesito hacerte unas preguntas.`
+Soy MarIA, tu asistente virtual de Uniflou. Te apoyaré en la gestión de tu Crédito Hipotecario.`
     );
 
-    await sendWhatsAppMessage(to, "1️⃣ ¿Podrías confirmarme tu RUT?");
+    await sendWhatsAppMessage(to, "1️⃣ Primero, necesito hacerte un par de preguntas, ¿Podrías confirmarme tu RUT?");
 
     console.log(`✅ Mensajes iniciales enviados a ${to}`);
   } catch (error) {
@@ -253,3 +252,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
+
