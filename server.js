@@ -1,4 +1,5 @@
 // server.js
+
 // --- IMPORTS ---
 import express from "express";
 import bodyParser from "body-parser";
@@ -37,25 +38,33 @@ function parseMondayPhoneColumn(col) {
   }
 }
 
-// --- FUNCION CENTRAL PARA ENVIAR MENSAJES ---
+// --- FUNCION CORREGIDA PARA ENVIAR MENSAJES ---
 async function sendWhatsAppMessage(to, body) {
   try {
+    if (!process.env.TWILIO_PHONE_NUMBER) {
+      throw new Error("TWILIO_PHONE_NUMBER no está definido en variables de entorno.");
+    }
+    if (!to || !body) {
+      throw new Error(`Parámetros inválidos en sendWhatsAppMessage: to=${to}, body=${body}`);
+    }
+
+    console.log(`📤 Enviando mensaje a ${to}: "${body}"`);
+
     const msg = await client.messages.create({
-      from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER.replace("whatsapp:", "")}`,
+      from: process.env.TWILIO_PHONE_NUMBER, // ejemplo: whatsapp:+14155238886
       to,
       body,
     });
-    console.log(`✅ Mensaje enviado a ${to}: ${body}`);
-    return msg;
+
+    console.log(`✅ Mensaje enviado correctamente (SID: ${msg.sid})`);
   } catch (err) {
-    console.error("❌ Error enviando mensaje WhatsApp:", err.message || err);
-    throw err;
+    console.error("❌ Error enviando mensaje WhatsApp:", err.message);
   }
 }
 
-// --- RUTA RAIZ (debug) ---
+// --- RUTA DE TEST ---
 app.get("/", (req, res) => {
-  res.send("✅ Servidor funcionando. Endpoints activos: /monday-webhook y /whatsapp-webhook.");
+  res.send("✅ Servidor funcionando. Webhooks activos en /monday-webhook y /whatsapp-webhook.");
 });
 
 // --- WEBHOOK DESDE MONDAY ---
@@ -63,7 +72,6 @@ app.post("/monday-webhook", async (req, res) => {
   console.log("📩 Webhook recibido desde Monday:", JSON.stringify(req.body, null, 2));
 
   if (req.body.challenge) {
-    console.log("🔹 Respondiendo challenge de Monday...");
     return res.status(200).send({ challenge: req.body.challenge });
   }
 
@@ -71,18 +79,12 @@ app.post("/monday-webhook", async (req, res) => {
 
   try {
     const event = req.body?.event;
-    if (!event) {
-      console.log("⚠️ Evento vacío recibido.");
-      return;
-    }
+    if (!event) return;
 
     const pulseId = event.pulseId;
-    if (!pulseId) {
-      console.log("⚠️ No se encontró pulseId en el evento:", event);
-      return;
-    }
+    if (!pulseId) return;
 
-    // --- CONSULTA GraphQL ---
+    // --- Consultar a Monday API ---
     const query = `
       query {
         items (ids: ${pulseId}) {
@@ -96,7 +98,6 @@ app.post("/monday-webhook", async (req, res) => {
         }
       }
     `;
-
     const mondayResp = await axios.post(
       "https://api.monday.com/v2",
       { query },
@@ -104,10 +105,7 @@ app.post("/monday-webhook", async (req, res) => {
     );
 
     const item = mondayResp.data?.data?.items?.[0];
-    if (!item) {
-      console.log("⚠️ No se obtuvo item desde Monday para id:", pulseId);
-      return;
-    }
+    if (!item) return;
 
     const columns = (item.column_values || []).reduce((acc, c) => {
       acc[c.id] = c;
@@ -116,7 +114,6 @@ app.post("/monday-webhook", async (req, res) => {
 
     console.log("📦 Column values del item:", Object.keys(columns));
 
-    // --- EXTRAER DATOS ---
     const nombre_cliente = item.name || "Cliente";
     const telefonoRaw =
       parseMondayPhoneColumn(columns["phone_mkxkb8na"]) ||
@@ -125,17 +122,14 @@ app.post("/monday-webhook", async (req, res) => {
       null;
 
     console.log("📞 Teléfono (raw):", telefonoRaw);
+    if (!telefonoRaw) return;
 
-    if (!telefonoRaw) {
-      console.log("⚠️ No hay teléfono en el item. No se enviará mensaje.");
-      return;
-    }
-
-    // --- NORMALIZAR TELÉFONO ---
+    // --- Normalizar teléfono ---
     let telefonoClean = telefonoRaw.replace(/\s+/g, "").replace(/[()\-\.]/g, "");
     if (!telefonoClean.startsWith("+")) {
-      if (/^0?9\d{7,}$/.test(telefonoClean)) {
-        telefonoClean = telefonoClean.replace(/^0/, "");
+      const t = telefonoClean;
+      if (/^0?9\d{7,}$/.test(t)) {
+        telefonoClean = t.replace(/^0/, "");
         telefonoClean = `+56${telefonoClean}`;
       } else {
         telefonoClean = `+${telefonoClean}`;
@@ -143,24 +137,26 @@ app.post("/monday-webhook", async (req, res) => {
     }
 
     const to = `whatsapp:${telefonoClean}`;
+
+    // --- Iniciar conversación ---
     conversations[to] = { step: 1, data: { nombre_cliente } };
 
-    // --- MENSAJES INICIALES ---
     await sendWhatsAppMessage(
       to,
       `Hola ${nombre_cliente}! 👋 
-Soy MarIA, tu asistente virtual que te va a apoyar con la gestión de tu crédito hipotecario. 
-Lo primero que haremos será contestar unas preguntas.`
+Soy MarIA, tu asistente virtual que te apoyará con la gestión de tu crédito hipotecario. 
+Primero necesito hacerte unas preguntas.`
     );
 
-    await sendWhatsAppMessage(to, "1️⃣ Me puedes confirmar tu RUT?");
+    await sendWhatsAppMessage(to, "1️⃣ ¿Podrías confirmarme tu RUT?");
+
     console.log(`✅ Mensajes iniciales enviados a ${to}`);
   } catch (error) {
     console.error("❌ Error procesando webhook de Monday:", error?.response?.data || error.message || error);
   }
 });
 
-// --- WEBHOOK DESDE TWILIO ---
+// --- WEBHOOK DESDE TWILIO (MENSAJES ENTRANTES) ---
 app.post("/whatsapp-webhook", async (req, res) => {
   res.status(200).send("OK");
 
@@ -168,10 +164,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
   const body = (req.body?.Body || "").trim();
   console.log(`💬 Mensaje entrante desde Twilio: from=${from} body="${body}"`);
 
-  if (!from) {
-    console.log("⚠️ Request de Twilio sin 'From'");
-    return;
-  }
+  if (!from) return;
 
   let convo = conversations[from];
   if (!convo) {
@@ -186,7 +179,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
       case 1:
         data.rut = body;
         convo.step = 2;
-        await sendWhatsAppMessage(from, "2️⃣ ¿Qué tipo de trabajador eres?\nResponde: 1) Dependiente  2) Independiente  3) Socio Empresa");
+        await sendWhatsAppMessage(from, "2️⃣ ¿Qué tipo de trabajador eres?\n1) Dependiente  2) Independiente  3) Socio Empresa");
         break;
 
       case 2: {
@@ -200,7 +193,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
       case 3:
         data.primera_vivienda = /^s/i.test(body) ? "Sí" : "No";
         convo.step = 4;
-        await sendWhatsAppMessage(from, "4️⃣ ¿Cuál es el precio de compra de tu propiedad? (valor en UF)");
+        await sendWhatsAppMessage(from, "4️⃣ ¿Cuál es el precio de compra de tu propiedad? (en UF)");
         break;
 
       case 4:
@@ -215,6 +208,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
 
         let docsText = "";
         const tipo = (data.tipo_trabajador || "").toLowerCase();
+
         if (tipo.includes("depend")) {
           docsText = `📄 Documentos requeridos (Dependiente):
 - 3 últimas liquidaciones de sueldo
@@ -230,6 +224,8 @@ app.post("/whatsapp-webhook", async (req, res) => {
 - Declaraciones de renta empresa y personal
 - Escritura de constitución
 - Certificado de vigencia de sociedad`;
+        } else {
+          docsText = `Por favor indícanos tu tipo de trabajador (Dependiente / Independiente / Socio Empresa).`;
         }
 
         await sendWhatsAppMessage(from, `Ahora necesito que me envíes los siguientes documentos:\n${docsText}`);
@@ -237,10 +233,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
 
       case 6:
         convo.step = 7;
-        await sendWhatsAppMessage(
-          from,
-          `✅ Muchas gracias, todos los documentos fueron recibidos y comenzaremos la evaluación crediticia. ¡Te contactaremos por correo! 👋`
-        );
+        await sendWhatsAppMessage(from, `✅ Gracias, todos los documentos fueron recibidos correctamente. Iniciaremos la evaluación crediticia. ¡Nos vemos! 👋`);
         delete conversations[from];
         break;
 
@@ -248,8 +241,10 @@ app.post("/whatsapp-webhook", async (req, res) => {
         await sendWhatsAppMessage(from, "Gracias! Si necesitas algo más, escribe 'ayuda'.");
         break;
     }
+
+    console.log("🧾 Conversación actual:", conversations[from]);
   } catch (err) {
-    console.error("❌ Error en webhook de Twilio:", err?.message || err);
+    console.error("❌ Error en webhook de Twilio:", err.message);
   }
 });
 
