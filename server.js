@@ -16,33 +16,50 @@ const conversations = {}; // { telefono: { step: 1, data: {} } }
 
 // --- Endpoint para recibir webhooks de Monday ---
 app.post("/monday-webhook", async (req, res) => {
-  res.status(200).send("OK");
-  const event = req.body.event || {};
-  const columns = event.columnValues || {};
+  try {
+    console.log("📩 Webhook recibido desde Monday:", req.body);
 
-  const nombre_cliente = columns.nombre_cliente?.text || "Cliente";
-  const telefono = columns.telefono?.text || null;
+    // Monday hace una prueba inicial de conexión sin contenido
+    if (!req.body.event) {
+      console.log("🟢 Conexión de prueba de Monday recibida. Todo OK.");
+      return res.status(200).send("OK");
+    }
 
-  if (!telefono) return console.log("⚠️ No hay teléfono para contacto inicial.");
+    // Si es un evento real, procesamos datos
+    const event = req.body.event || {};
+    const columns = event.columnValues || {};
 
-  const to = `whatsapp:${telefono.replace(/\D/g, "")}`;
-  conversations[to] = { step: 1, data: { nombre_cliente } };
+    const nombre_cliente = columns.nombre_cliente?.text || "Cliente";
+    const telefono = columns.telefono?.text || null;
 
-  // Primer mensaje
-  await client.messages.create({
-    from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
-    to,
-    body: `Hola ${nombre_cliente}! 👋 
+    if (!telefono) {
+      console.log("⚠️ No hay teléfono para contacto inicial.");
+      return res.status(200).send("Sin teléfono");
+    }
+
+    const to = `whatsapp:${telefono.replace(/\D/g, "")}`;
+    conversations[to] = { step: 1, data: { nombre_cliente } };
+
+    // Enviar mensajes iniciales
+    await client.messages.create({
+      from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
+      to,
+      body: `Hola ${nombre_cliente}! 👋 
 Soy MarIA, tu asistente virtual que te va a apoyar con la gestión de tu crédito hipotecario. 
 Lo primero que vamos a hacer es contestar unas preguntas.`,
-  });
+    });
 
-  // Segundo mensaje (pregunta 1)
-  await client.messages.create({
-    from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
-    to,
-    body: `1️⃣ Me puedes confirmar tu RUT?`,
-  });
+    await client.messages.create({
+      from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
+      to,
+      body: `1️⃣ Me puedes confirmar tu RUT?`,
+    });
+
+    res.status(200).send("OK");
+  } catch (error) {
+    console.error("❌ Error en webhook de Monday:", error);
+    res.status(500).send("Error interno");
+  }
 });
 
 // --- Webhook para recibir mensajes desde Twilio ---
@@ -151,9 +168,6 @@ async function sendMessage(to, body) {
   });
 }
 
-
-
 // --- Iniciar servidor ---
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
-
+app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
