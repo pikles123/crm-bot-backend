@@ -1,3 +1,4 @@
+// --- IMPORTS ---
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
@@ -9,38 +10,41 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
+// --- TWILIO CLIENT ---
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-// --- Estado temporal de conversaciones ---
+// --- ESTADO TEMPORAL DE CONVERSACIONES ---
 const conversations = {}; // { telefono: { step: 1, data: {} } }
 
-// --- Endpoint para recibir webhooks de Monday ---
+// --- WEBHOOK DESDE MONDAY ---
 app.post("/monday-webhook", async (req, res) => {
+  console.log("📩 Webhook recibido desde Monday:", req.body);
+
+  // Paso 1: Challenge de conexión
+  if (req.body.challenge) {
+    console.log("🔹 Respondiendo challenge de Monday...");
+    return res.status(200).send({ challenge: req.body.challenge });
+  }
+
+  // Paso 2: Confirmar recepción normal del webhook
+  res.status(200).send("OK");
+
   try {
-    console.log("📩 Webhook recibido desde Monday:", req.body);
+    const event = req.body?.event || {};
+    const columns = event?.columnValues || {};
 
-    // Monday hace una prueba inicial de conexión sin contenido
-    if (!req.body.event) {
-      console.log("🟢 Conexión de prueba de Monday recibida. Todo OK.");
-      return res.status(200).send("OK");
-    }
-
-    // Si es un evento real, procesamos datos
-    const event = req.body.event || {};
-    const columns = event.columnValues || {};
-
-    const nombre_cliente = columns.nombre_cliente?.text || "Cliente";
-    const telefono = columns.telefono?.text || null;
+    const nombre_cliente = columns?.nombre_cliente?.text || "Cliente";
+    const telefono = columns?.telefono?.text || null;
 
     if (!telefono) {
-      console.log("⚠️ No hay teléfono para contacto inicial.");
-      return res.status(200).send("Sin teléfono");
+      console.log("⚠️ No hay teléfono, no se puede iniciar conversación.");
+      return;
     }
 
     const to = `whatsapp:${telefono.replace(/\D/g, "")}`;
     conversations[to] = { step: 1, data: { nombre_cliente } };
 
-    // Enviar mensajes iniciales
+    // Mensaje inicial
     await client.messages.create({
       from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
       to,
@@ -49,20 +53,19 @@ Soy MarIA, tu asistente virtual que te va a apoyar con la gestión de tu crédit
 Lo primero que vamos a hacer es contestar unas preguntas.`,
     });
 
+    // Primera pregunta
     await client.messages.create({
       from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
       to,
       body: `1️⃣ Me puedes confirmar tu RUT?`,
     });
 
-    res.status(200).send("OK");
-  } catch (error) {
-    console.error("❌ Error en webhook de Monday:", error);
-    res.status(500).send("Error interno");
+  } catch (err) {
+    console.error("❌ Error procesando webhook:", err.message);
   }
 });
 
-// --- Webhook para recibir mensajes desde Twilio ---
+// --- WEBHOOK DESDE TWILIO (RESPUESTAS DEL CLIENTE) ---
 app.post("/whatsapp-webhook", async (req, res) => {
   res.status(200).send("OK");
 
@@ -100,7 +103,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
       await sendMessage(from, "4️⃣ ¿Cuál es el precio de compra de tu propiedad? (en UF)");
       break;
 
-    // Pregunta 4 - Precio de compra
+    // Pregunta 4 - Precio
     case 4:
       data.precio_uf = message;
       conversation.step = 5;
@@ -112,7 +115,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
       data.tipo_vivienda = message.toLowerCase().includes("casa") ? "Casa" : "Departamento";
       conversation.step = 6;
 
-      // Enviar lista de documentos según tipo de trabajador
+      // Enviar documentos según tipo de trabajador
       let docs = "";
       switch (data.tipo_trabajador.toLowerCase()) {
         case "dependiente":
@@ -159,7 +162,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
   }
 });
 
-// --- Función auxiliar para enviar mensajes ---
+// --- FUNCIÓN AUXILIAR PARA ENVIAR MENSAJES ---
 async function sendMessage(to, body) {
   await client.messages.create({
     from: `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`,
@@ -168,6 +171,13 @@ async function sendMessage(to, body) {
   });
 }
 
-// --- Iniciar servidor ---
+// --- HOME (para debug visual) ---
+app.get("/", (req, res) => {
+  res.send("✅ Servidor funcionando correctamente. Ruta raíz activa.");
+});
+
+// --- INICIAR SERVIDOR ---
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+});
