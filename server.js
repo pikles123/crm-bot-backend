@@ -14,13 +14,16 @@ const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
+// --- CONFIGURACIÓN ---
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MONDAY_API_KEY = process.env.MONDAY_API_KEY;
-const MONDAY_FILE_COLUMN_ID = process.env.MONDAY_FILE_COLUMN_ID || "archivos";
+const MONDAY_FILE_COLUMN_ID = process.env.MONDAY_FILE_COLUMN_ID || "archivos"; // columna "Archivos"
+const MONDAY_BOARD_ID = process.env.MONDAY_BOARD_ID;
+const MONDAY_ITEM_ID_COLUMN = process.env.MONDAY_ITEM_ID_COLUMN || "telefono"; // columna de teléfono
+const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53";
 
 const conversations = {};
-const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53"; // tu SID real
 
 // --- Helpers ---
 const sendWhatsAppMessage = async (to, body) => {
@@ -75,7 +78,9 @@ const handleFileUpload = async (from, url, itemId) => {
 
   const response = await axios.get(url, {
     responseType: "arraybuffer",
-    headers: { Authorization: `Basic ${Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64")}` },
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64")}`,
+    },
   });
 
   fs.writeFileSync(localPath, response.data);
@@ -130,7 +135,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
     if (convo.step === 1) {
       convo.data.rut = body;
       convo.step = 2;
-      convo.itemId = await findOrCreateMondayItem(body); // 🔍 Vincula con Monday
+      convo.itemId = await findOrCreateMondayItem(body); // Vincula con Monday
       await sendWhatsAppMessage(from, steps[1]);
       return;
     }
@@ -199,9 +204,48 @@ app.post("/whatsapp-webhook", async (req, res) => {
   }
 });
 
+// --- Webhook de Monday ---
+app.post("/monday-webhook", async (req, res) => {
+  try {
+    console.log("📩 Webhook recibido desde Monday:", JSON.stringify(req.body, null, 2));
+    res.status(200).send({ status: "ok" });
+
+    const event = req.body.event;
+    if (!event) {
+      console.warn("⚠️ No se recibió evento en el webhook de Monday");
+      return;
+    }
+
+    const itemId = event.pulseId || event.itemId;
+    const columnValues = event.columnValues || {};
+    const nombre_cliente = columnValues.name || "Cliente";
+
+    console.log(`🧭 Evento de Monday para item ${itemId} (${nombre_cliente})`);
+
+    const telefonoCol = MONDAY_ITEM_ID_COLUMN;
+    const telefono = columnValues[telefonoCol]?.text || columnValues[telefonoCol]?.value;
+
+    if (!telefono) {
+      console.warn(`⚠️ No se encontró número de teléfono en la columna '${telefonoCol}'`);
+      return;
+    }
+
+    const telefonoClean = telefono.replace(/\D/g, "");
+    const to = `whatsapp:+${telefonoClean}`;
+    console.log("📱 Enviando mensaje inicial al número:", to);
+
+    conversations[to] = { step: 0, data: { nombre_cliente } };
+    await sendWhatsAppTemplate(to, nombre_cliente);
+    console.log("✅ Mensaje inicial enviado. Esperando respuesta del cliente...");
+  } catch (error) {
+    console.error("❌ Error procesando webhook de Monday:", error.message);
+    res.status(500).send({ error: error.message });
+  }
+});
+
 // --- Buscar o crear item en Monday (por RUT) ---
 async function findOrCreateMondayItem(rut) {
-  const boardId = process.env.MONDAY_BOARD_ID;
+  const boardId = MONDAY_BOARD_ID;
   const query = `
     query {
       items_page_by_column_values (board_id: ${boardId}, columns: [{column_id: "rut", column_value: "${rut}"}]) {
@@ -226,7 +270,6 @@ async function findOrCreateMondayItem(rut) {
     return existing.id;
   }
 
-  // Crear item si no existe
   const mutation = `
     mutation {
       create_item (board_id: ${boardId}, item_name: "Cliente ${rut}", column_values: "{\\"rut\\": \\"${rut}\\"}") {
