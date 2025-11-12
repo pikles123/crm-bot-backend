@@ -14,18 +14,17 @@ const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// --- CONFIGURACIÓN ---
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
 const MONDAY_API_KEY = process.env.MONDAY_API_KEY;
-const MONDAY_FILE_COLUMN_ID = process.env.MONDAY_FILE_COLUMN_ID || "archivos"; // columna "Archivos"
-const MONDAY_BOARD_ID = process.env.MONDAY_BOARD_ID;
-const MONDAY_ITEM_ID_COLUMN = process.env.MONDAY_ITEM_ID_COLUMN || "telefono"; // columna de teléfono
-const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53";
+const MONDAY_FILE_COLUMN_ID = process.env.MONDAY_FILE_COLUMN_ID || "archivos";
+const MONDAY_ITEM_ID_COLUMN = process.env.MONDAY_ITEM_ID_COLUMN || "phone_mkxkb8na";
+const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53"; // SID real
 
 const conversations = {};
 
-// --- Helpers ---
+// --- HELPERS ---
 const sendWhatsAppMessage = async (to, body) => {
   try {
     await client.messages.create({ from: process.env.TWILIO_PHONE_NUMBER, to, body });
@@ -49,7 +48,7 @@ const sendWhatsAppTemplate = async (to, nombre_cliente) => {
   }
 };
 
-// Subir archivo a Monday
+// --- SUBIDA DE ARCHIVOS A MONDAY ---
 const uploadToMonday = async (itemId, filePath, fileName) => {
   const query = `mutation ($file: File!) {
     add_file_to_column (item_id: ${itemId}, column_id: "${MONDAY_FILE_COLUMN_ID}", file: $file) {
@@ -71,35 +70,32 @@ const uploadToMonday = async (itemId, filePath, fileName) => {
   console.log("📤 Subida a Monday:", result);
 };
 
-// Descargar archivo de Twilio y subir a Monday
+// --- DESCARGA DE ARCHIVO TWILIO + SUBIDA A MONDAY ---
 const handleFileUpload = async (from, url, itemId) => {
   const filename = url.split("/").pop();
   const localPath = `./uploads/${filename}`;
 
   const response = await axios.get(url, {
     responseType: "arraybuffer",
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64")}`,
-    },
+    headers: { Authorization: `Basic ${Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64")}` },
   });
 
   fs.writeFileSync(localPath, response.data);
   console.log(`📁 Archivo guardado localmente: ${filename}`);
 
   await uploadToMonday(itemId, localPath, filename);
-
-  fs.unlinkSync(localPath); // limpiar archivo temporal
+  fs.unlinkSync(localPath);
   console.log(`✅ Archivo subido y eliminado: ${filename}`);
 };
 
-// --- Documentos esperados ---
+// --- DOCUMENTOS REQUERIDOS ---
 const requiredDocs = {
   dependiente: ["liquidaciones", "cedula", "cotizaciones"],
   independiente: ["cedula", "dai", "carpeta", "boletas"],
   socio: ["cedula", "dai empresa", "dai personal", "balance", "carpeta", "cotizaciones", "liquidaciones"],
 };
 
-// --- Flujo de preguntas ---
+// --- FLUJO DE PREGUNTAS ---
 const steps = [
   "Primero, necesito hacerte un par de preguntas. ¿Podrías confirmarme tu RUT?",
   "¿Es tu primera vivienda? (Sí / No)",
@@ -108,7 +104,7 @@ const steps = [
   "¿Qué tipo de trabajador eres?\n1) Dependiente\n2) Independiente\n3) Socio Empresa",
 ];
 
-// --- Webhook WhatsApp ---
+// --- WEBHOOK DE WHATSAPP ---
 app.post("/whatsapp-webhook", async (req, res) => {
   res.status(200).send("OK");
 
@@ -135,7 +131,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
     if (convo.step === 1) {
       convo.data.rut = body;
       convo.step = 2;
-      convo.itemId = await findOrCreateMondayItem(body); // Vincula con Monday
+      convo.itemId = await findOrCreateMondayItem(body);
       await sendWhatsAppMessage(from, steps[1]);
       return;
     }
@@ -187,8 +183,8 @@ app.post("/whatsapp-webhook", async (req, res) => {
       }
 
       convo.receivedDocs.push(...Array(numMedia).fill("ok"));
-
       const expected = requiredDocs[convo.data.tipo_trabajador];
+
       if (convo.receivedDocs.length >= expected.length) {
         await sendWhatsAppMessage(
           from,
@@ -204,48 +200,74 @@ app.post("/whatsapp-webhook", async (req, res) => {
   }
 });
 
-// --- Webhook de Monday ---
+// --- WEBHOOK DE MONDAY ---
 app.post("/monday-webhook", async (req, res) => {
-  try {
-    console.log("📩 Webhook recibido desde Monday:", JSON.stringify(req.body, null, 2));
-    res.status(200).send({ status: "ok" });
+  console.log("📩 Webhook recibido desde Monday:", JSON.stringify(req.body, null, 2));
 
-    const event = req.body.event;
-    if (!event) {
-      console.warn("⚠️ No se recibió evento en el webhook de Monday");
-      return;
+  const event = req.body.event;
+  if (!event || !event.pulseId) return res.status(400).send("Evento inválido");
+
+  const itemId = event.pulseId;
+  console.log(`🧭 Evento de Monday para item ${itemId} (${event.pulseName})`);
+
+  try {
+    // Obtener datos del item desde Monday
+    const query = `query {
+      items (ids: [${itemId}]) {
+        id
+        name
+        column_values { id title value text }
+      }
+    }`;
+
+    const response = await fetch("https://api.monday.com/v2", {
+      method: "POST",
+      headers: {
+        Authorization: MONDAY_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    const data = await response.json();
+    const item = data?.data?.items?.[0];
+    if (!item) {
+      console.log("⚠️ No se encontró el item");
+      return res.status(200).send("Item no encontrado");
     }
 
-    const itemId = event.pulseId || event.itemId;
-    const columnValues = event.columnValues || {};
-    const nombre_cliente = columnValues.name || "Cliente";
+    // Extraer teléfono
+    const phoneColumn = item.column_values.find(c => c.id === MONDAY_ITEM_ID_COLUMN);
+    let telefono = null;
 
-    console.log(`🧭 Evento de Monday para item ${itemId} (${nombre_cliente})`);
-
-    const telefonoCol = MONDAY_ITEM_ID_COLUMN;
-    const telefono = columnValues[telefonoCol]?.text || columnValues[telefonoCol]?.value;
+    if (phoneColumn && phoneColumn.value) {
+      try {
+        const parsed = JSON.parse(phoneColumn.value);
+        telefono = parsed.phone;
+      } catch {
+        telefono = phoneColumn.text || phoneColumn.value;
+      }
+    }
 
     if (!telefono) {
-      console.warn(`⚠️ No se encontró número de teléfono en la columna '${telefonoCol}'`);
-      return;
+      console.log(`⚠️ No se encontró número de teléfono en la columna '${MONDAY_ITEM_ID_COLUMN}'`);
+      return res.status(200).send("Sin número de teléfono");
     }
 
-    const telefonoClean = telefono.replace(/\D/g, "");
-    const to = `whatsapp:+${telefonoClean}`;
-    console.log("📱 Enviando mensaje inicial al número:", to);
+    console.log(`📞 Teléfono encontrado: ${telefono}`);
 
-    conversations[to] = { step: 0, data: { nombre_cliente } };
-    await sendWhatsAppTemplate(to, nombre_cliente);
-    console.log("✅ Mensaje inicial enviado. Esperando respuesta del cliente...");
-  } catch (error) {
-    console.error("❌ Error procesando webhook de Monday:", error.message);
-    res.status(500).send({ error: error.message });
+    // Enviar template de WhatsApp
+    await sendWhatsAppTemplate(`whatsapp:${telefono}`, item.name || "Cliente");
+    res.status(200).send("Mensaje enviado");
+  } catch (err) {
+    console.error("❌ Error procesando webhook de Monday:", err.message);
+    res.status(500).send("Error interno");
   }
 });
 
-// --- Buscar o crear item en Monday (por RUT) ---
+// --- BUSCAR O CREAR ITEM EN MONDAY ---
 async function findOrCreateMondayItem(rut) {
-  const boardId = MONDAY_BOARD_ID;
+  const boardId = process.env.MONDAY_BOARD_ID;
   const query = `
     query {
       items_page_by_column_values (board_id: ${boardId}, columns: [{column_id: "rut", column_value: "${rut}"}]) {
@@ -255,10 +277,7 @@ async function findOrCreateMondayItem(rut) {
 
   const response = await fetch("https://api.monday.com/v2", {
     method: "POST",
-    headers: {
-      Authorization: MONDAY_API_KEY,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: MONDAY_API_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ query }),
   });
 
@@ -279,10 +298,7 @@ async function findOrCreateMondayItem(rut) {
 
   const createRes = await fetch("https://api.monday.com/v2", {
     method: "POST",
-    headers: {
-      Authorization: MONDAY_API_KEY,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: MONDAY_API_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ query: mutation }),
   });
 
@@ -291,6 +307,6 @@ async function findOrCreateMondayItem(rut) {
   return newItem.data.create_item.id;
 }
 
-// --- Iniciar servidor ---
+// --- INICIAR SERVIDOR ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 MarIA corriendo en puerto ${PORT}`));
