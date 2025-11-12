@@ -1,4 +1,5 @@
-// --- IMPORTS ---
+// server.js — MarIA (v2 flujo completo con IA y Twilio)
+
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
@@ -8,186 +9,211 @@ import OpenAI from "openai";
 
 dotenv.config();
 
-console.log("✅ Verificando variables de entorno...");
-console.log("TWILIO_ACCOUNT_SID:", process.env.TWILIO_ACCOUNT_SID);
-console.log("TWILIO_PHONE_NUMBER:", process.env.TWILIO_PHONE_NUMBER);
-console.log("OPENAI_API_KEY:", process.env.OPENAI_API_KEY ? "✅ OK" : "❌ FALTA");
-
-// --- APP EXPRESS ---
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// --- CLIENTES ---
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// --- ESTADO DE CONVERSACIONES ---
-const conversations = {}; // key = "whatsapp:+569..." → { history: [{role, content}], nombre_cliente }
-
-// --- TEMPLATE SID ---
-const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53"; // reemplazar si cambia
+const conversations = {};
+const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53"; // reemplaza por tu SID real
 
 // --- HELPERS ---
-function parseMondayPhoneColumn(col) {
+const sendWhatsAppMessage = async (to, body) => {
   try {
-    if (!col) return null;
-    if (col.value) {
-      const parsed = typeof col.value === "string" ? JSON.parse(col.value) : col.value;
-      if (parsed?.phone) return parsed.phone;
-    }
-    if (col.text) return col.text;
-    return null;
+    await client.messages.create({
+      from: process.env.TWILIO_PHONE_NUMBER,
+      to,
+      body,
+    });
+    console.log(`✅ Mensaje enviado a ${to}: ${body}`);
   } catch (e) {
-    return col.text || null;
+    console.error("❌ Error enviando mensaje:", e.message);
   }
-}
+};
 
-// --- FUNCION: Enviar template ---
-async function sendWhatsAppTemplate(to, nombre_cliente) {
+const sendWhatsAppTemplate = async (to, nombre_cliente) => {
   try {
-    const msg = await client.messages.create({
+    await client.messages.create({
       from: process.env.TWILIO_PHONE_NUMBER,
       to,
       contentSid: WHATSAPP_TEMPLATE_SID,
       contentVariables: JSON.stringify({ "1": nombre_cliente || "cliente" }),
     });
-    console.log(`✅ Template enviado (SID: ${msg.sid})`);
-  } catch (err) {
-    console.error("❌ Error enviando template:", err.message);
+    console.log(`✅ Template enviado a ${to}`);
+  } catch (e) {
+    console.error("❌ Error enviando template:", e.message);
   }
-}
+};
 
-// --- FUNCION: Enviar mensaje ---
-async function sendWhatsAppMessage(to, body) {
+// --- IA NATURAL ---
+const askAI = async (history) => {
   try {
-    const msg = await client.messages.create({
-      from: process.env.TWILIO_PHONE_NUMBER,
-      to,
-      body,
-    });
-    console.log(`✅ Enviado a ${to}: "${body}"`);
-  } catch (err) {
-    console.error("❌ Error enviando WhatsApp:", err.message);
-  }
-}
-
-// --- FUNCION: Obtener respuesta desde OpenAI ---
-async function getAIResponse(history) {
-  try {
-    const completion = await openai.chat.completions.create({
+    const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      temperature: 0.7,
       messages: [
         {
           role: "system",
-          content: `Eres MarIA, asistente virtual de Uniflou, experta en créditos hipotecarios en Chile.
-Hablas con tono amable, claro y profesional. 
-Puedes guiar a los clientes con documentos, requisitos y pasos del crédito hipotecario. 
-Si el cliente envía archivos, puedes pedirle que confirme qué documento es.`,
+          content: `Eres MarIA, la asistente virtual de Uniflou.
+Tu tarea es acompañar al cliente en su solicitud de Crédito Hipotecario.
+Responde de forma clara, empática y profesional.
+Nunca cambies el orden del flujo ni las preguntas, pero puedes ser amable y aclarar dudas.`,
         },
         ...history,
       ],
     });
-
-    return completion.choices[0].message.content;
-  } catch (error) {
-    console.error("❌ Error generando respuesta de IA:", error.message);
-    return "Lo siento, tuve un problema al procesar tu mensaje. ¿Podrías repetirlo?";
-  }
-}
-
-// --- RUTA TEST ---
-app.get("/", (req, res) => {
-  res.send("✅ Servidor funcionando con Twilio + OpenAI.");
-});
-
-// --- WEBHOOK MONDAY ---
-app.post("/monday-webhook", async (req, res) => {
-  res.status(200).send("OK");
-  try {
-    const event = req.body?.event;
-    if (!event) throw new Error("No se recibió 'event' desde Monday.");
-    const pulseId = event.pulseId;
-
-    // --- Consultar datos en Monday ---
-    const query = `
-      query {
-        items (ids: ${pulseId}) {
-          id
-          name
-          column_values { id text value }
-        }
-      }
-    `;
-    const mondayResp = await axios.post(
-      "https://api.monday.com/v2",
-      { query },
-      { headers: { Authorization: process.env.MONDAY_API_TOKEN } }
-    );
-
-    const item = mondayResp.data?.data?.items?.[0];
-    if (!item) throw new Error("Item no encontrado en Monday.");
-
-    const columns = (item.column_values || []).reduce((acc, c) => {
-      acc[c.id] = c;
-      return acc;
-    }, {});
-
-    const nombre_cliente = item.name || "Cliente";
-    const telefonoRaw =
-      parseMondayPhoneColumn(columns["phone_mkxkb8na"]) ||
-      parseMondayPhoneColumn(columns["telefono"]) ||
-      parseMondayPhoneColumn(columns["text_mkxk37gb"]) ||
-      null;
-
-    if (!telefonoRaw) throw new Error("No se encontró teléfono en Monday.");
-
-    let telefonoClean = telefonoRaw.replace(/\s+/g, "").replace(/[()\-\.]/g, "");
-    if (!telefonoClean.startsWith("+")) {
-      if (/^0?9\d{7,}$/.test(telefonoClean)) {
-        telefonoClean = telefonoClean.replace(/^0/, "");
-        telefonoClean = `+56${telefonoClean}`;
-      } else {
-        telefonoClean = `+${telefonoClean}`;
-      }
-    }
-
-    const to = `whatsapp:${telefonoClean}`;
-    console.log("📱 Enviando template inicial a:", to);
-
-    conversations[to] = { history: [], nombre_cliente };
-    await sendWhatsAppTemplate(to, nombre_cliente);
+    return response.choices[0].message.content;
   } catch (err) {
-    console.error("❌ Error procesando webhook de Monday:", err.message);
+    console.error("❌ Error en IA:", err.message);
+    return "Perdón, tuve un problema procesando tu respuesta. ¿Podrías repetirla?";
   }
-});
+};
 
-// --- WEBHOOK TWILIO ---
+// --- DOCUMENTOS SEGÚN TIPO DE TRABAJADOR ---
+const requiredDocs = {
+  dependiente: [
+    "3 últimas liquidaciones de sueldo",
+    "Cédula de Identidad por ambos lados",
+    "Cotizaciones AFP (últimos 12 meses)",
+  ],
+  independiente: [
+    "Cédula de Identidad por ambos lados",
+    "Declaración Anual de Impuestos DAI del año en curso (Formulario 22)",
+    "Carpeta Tributaria Personal",
+    "Últimas 6 boletas emitidas",
+  ],
+  socio: [
+    "Cédula de Identidad por ambos lados",
+    "Declaración Anual de Impuestos DAI Empresa (Formulario 22)",
+    "Declaración Anual de Impuestos DAI Personal (Formulario 22)",
+    "Último Balance Empresa",
+    "Carpeta Tributaria Empresa",
+    "Cotizaciones AFP (últimos 12 meses)",
+    "3 últimas liquidaciones de sueldo",
+  ],
+};
+
+// --- FLUJO DE CONVERSACIÓN ---
+const steps = [
+  "Primero, necesito hacerte un par de preguntas. ¿Podrías confirmarme tu RUT?",
+  "¿Es tu primera vivienda? (Sí / No)",
+  "¿Qué tipo de vivienda es? (casa/departamento)",
+  "¿Cuál es el precio de compra de tu propiedad? (en UF)",
+  "¿Qué tipo de trabajador eres?\n1) Dependiente\n2) Independiente\n3) Socio Empresa",
+];
+
 app.post("/whatsapp-webhook", async (req, res) => {
   res.status(200).send("OK");
 
   const from = req.body?.From;
   const body = (req.body?.Body || "").trim();
-  if (!from || !body) return;
+  const numMedia = parseInt(req.body?.NumMedia || "0");
+  const hasMedia = numMedia > 0;
 
-  console.log(`💬 Mensaje entrante de ${from}: "${body}"`);
+  if (!from) return;
 
-  if (!conversations[from]) conversations[from] = { history: [] };
+  if (!conversations[from]) {
+    conversations[from] = { step: 0, data: {}, history: [] };
+    await sendWhatsAppTemplate(from, "Cliente");
+    return;
+  }
 
-  // --- Guardar mensaje del usuario ---
-  conversations[from].history.push({ role: "user", content: body });
+  const convo = conversations[from];
+  convo.history.push({ role: "user", content: body });
 
-  // --- Obtener respuesta IA ---
-  const reply = await getAIResponse(conversations[from].history);
+  try {
+    // --- Paso 0: Primer mensaje después del template ---
+    if (convo.step === 0) {
+      convo.step = 1;
+      await sendWhatsAppMessage(from, steps[0]);
+      return;
+    }
 
-  // --- Guardar respuesta del asistente ---
-  conversations[from].history.push({ role: "assistant", content: reply });
+    // --- Paso 1: RUT ---
+    if (convo.step === 1) {
+      convo.data.rut = body;
+      convo.step = 2;
+      await sendWhatsAppMessage(from, steps[1]);
+      return;
+    }
 
-  // --- Enviar por WhatsApp ---
-  await sendWhatsAppMessage(from, reply);
+    // --- Paso 2: Primera vivienda ---
+    if (convo.step === 2) {
+      convo.data.primera_vivienda = /^s/i.test(body) ? "Sí" : "No";
+      convo.step = 3;
+      await sendWhatsAppMessage(from, steps[2]);
+      return;
+    }
+
+    // --- Paso 3: Tipo de vivienda ---
+    if (convo.step === 3) {
+      convo.data.tipo_vivienda = /casa/i.test(body) ? "Casa" : "Departamento";
+      convo.step = 4;
+      await sendWhatsAppMessage(from, steps[3]);
+      return;
+    }
+
+    // --- Paso 4: Precio UF ---
+    if (convo.step === 4) {
+      convo.data.precio_uf = body;
+      convo.step = 5;
+      await sendWhatsAppMessage(from, steps[4]);
+      return;
+    }
+
+    // --- Paso 5: Tipo de trabajador ---
+    if (convo.step === 5) {
+      let tipo = "";
+      if (/1|depend/i.test(body)) tipo = "dependiente";
+      else if (/2|indepen/i.test(body)) tipo = "independiente";
+      else if (/3|socio/i.test(body)) tipo = "socio";
+
+      if (!tipo) {
+        await sendWhatsAppMessage(from, "Por favor, indícanos tu tipo de trabajador (1, 2 o 3).");
+        return;
+      }
+
+      convo.data.tipo_trabajador = tipo;
+      convo.step = 6;
+
+      const docs = requiredDocs[tipo];
+      await sendWhatsAppMessage(
+        from,
+        `📄 Documentos requeridos (${tipo.charAt(0).toUpperCase() + tipo.slice(1)}):\n- ${docs.join(
+          "\n- "
+        )}\n\nPor favor envíalos aquí uno por uno o todos juntos.`
+      );
+      return;
+    }
+
+    // --- Paso 6: Recepción de documentos ---
+    if (convo.step === 6) {
+      if (hasMedia) {
+        convo.data.docs = (convo.data.docs || 0) + numMedia;
+        await sendWhatsAppMessage(from, "📎 Documento recibido. Gracias 🙌");
+      } else {
+        const aiReply = await askAI([
+          { role: "user", content: `El cliente dice: ${body}. Está en el paso de envío de documentos.` },
+        ]);
+        await sendWhatsAppMessage(from, aiReply);
+      }
+
+      // Si ya envió al menos 3 archivos, cerrar conversación
+      if ((convo.data.docs || 0) >= 3) {
+        convo.step = 7;
+        await sendWhatsAppMessage(
+          from,
+          "✅ Gracias, todos los documentos fueron recibidos correctamente. Iniciaremos la evaluación crediticia. ¡Nos vemos! 👋"
+        );
+        delete conversations[from];
+      }
+    }
+  } catch (err) {
+    console.error("❌ Error en webhook Twilio:", err.message);
+  }
 });
 
 // --- INICIAR SERVIDOR ---
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 MarIA corriendo en puerto ${PORT}`));
