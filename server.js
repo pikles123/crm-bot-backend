@@ -1,10 +1,11 @@
-// server.js — MarIA (v2 flujo completo con IA y Twilio)
-
 import express from "express";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import twilio from "twilio";
 import axios from "axios";
+import fs from "fs";
+import FormData from "form-data";
+import fetch from "node-fetch";
 import OpenAI from "openai";
 
 dotenv.config();
@@ -15,18 +16,16 @@ app.use(bodyParser.urlencoded({ extended: true }));
 
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const MONDAY_API_KEY = process.env.MONDAY_API_KEY;
+const MONDAY_FILE_COLUMN_ID = process.env.MONDAY_FILE_COLUMN_ID || "archivos";
 
 const conversations = {};
-const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53"; // reemplaza por tu SID real
+const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53"; // tu SID real
 
-// --- HELPERS ---
+// --- Helpers ---
 const sendWhatsAppMessage = async (to, body) => {
   try {
-    await client.messages.create({
-      from: process.env.TWILIO_PHONE_NUMBER,
-      to,
-      body,
-    });
+    await client.messages.create({ from: process.env.TWILIO_PHONE_NUMBER, to, body });
     console.log(`✅ Mensaje enviado a ${to}: ${body}`);
   } catch (e) {
     console.error("❌ Error enviando mensaje:", e.message);
@@ -47,54 +46,55 @@ const sendWhatsAppTemplate = async (to, nombre_cliente) => {
   }
 };
 
-// --- IA NATURAL ---
-const askAI = async (history) => {
-  try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `Eres MarIA, la asistente virtual de Uniflou.
-Tu tarea es acompañar al cliente en su solicitud de Crédito Hipotecario.
-Responde de forma clara, empática y profesional.
-Nunca cambies el orden del flujo ni las preguntas, pero puedes ser amable y aclarar dudas.`,
-        },
-        ...history,
-      ],
-    });
-    return response.choices[0].message.content;
-  } catch (err) {
-    console.error("❌ Error en IA:", err.message);
-    return "Perdón, tuve un problema procesando tu respuesta. ¿Podrías repetirla?";
-  }
+// Subir archivo a Monday
+const uploadToMonday = async (itemId, filePath, fileName) => {
+  const query = `mutation ($file: File!) {
+    add_file_to_column (item_id: ${itemId}, column_id: "${MONDAY_FILE_COLUMN_ID}", file: $file) {
+      id
+    }
+  }`;
+
+  const form = new FormData();
+  form.append("query", query);
+  form.append("variables[file]", fs.createReadStream(filePath));
+
+  const response = await fetch("https://api.monday.com/v2/file", {
+    method: "POST",
+    headers: { Authorization: MONDAY_API_KEY },
+    body: form,
+  });
+
+  const result = await response.json();
+  console.log("📤 Subida a Monday:", result);
 };
 
-// --- DOCUMENTOS SEGÚN TIPO DE TRABAJADOR ---
+// Descargar archivo de Twilio y subir a Monday
+const handleFileUpload = async (from, url, itemId) => {
+  const filename = url.split("/").pop();
+  const localPath = `./uploads/${filename}`;
+
+  const response = await axios.get(url, {
+    responseType: "arraybuffer",
+    headers: { Authorization: `Basic ${Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64")}` },
+  });
+
+  fs.writeFileSync(localPath, response.data);
+  console.log(`📁 Archivo guardado localmente: ${filename}`);
+
+  await uploadToMonday(itemId, localPath, filename);
+
+  fs.unlinkSync(localPath); // limpiar archivo temporal
+  console.log(`✅ Archivo subido y eliminado: ${filename}`);
+};
+
+// --- Documentos esperados ---
 const requiredDocs = {
-  dependiente: [
-    "3 últimas liquidaciones de sueldo",
-    "Cédula de Identidad por ambos lados",
-    "Cotizaciones AFP (últimos 12 meses)",
-  ],
-  independiente: [
-    "Cédula de Identidad por ambos lados",
-    "Declaración Anual de Impuestos DAI del año en curso (Formulario 22)",
-    "Carpeta Tributaria Personal",
-    "Últimas 6 boletas emitidas",
-  ],
-  socio: [
-    "Cédula de Identidad por ambos lados",
-    "Declaración Anual de Impuestos DAI Empresa (Formulario 22)",
-    "Declaración Anual de Impuestos DAI Personal (Formulario 22)",
-    "Último Balance Empresa",
-    "Carpeta Tributaria Empresa",
-    "Cotizaciones AFP (últimos 12 meses)",
-    "3 últimas liquidaciones de sueldo",
-  ],
+  dependiente: ["liquidaciones", "cedula", "cotizaciones"],
+  independiente: ["cedula", "dai", "carpeta", "boletas"],
+  socio: ["cedula", "dai empresa", "dai personal", "balance", "carpeta", "cotizaciones", "liquidaciones"],
 };
 
-// --- FLUJO DE CONVERSACIÓN ---
+// --- Flujo de preguntas ---
 const steps = [
   "Primero, necesito hacerte un par de preguntas. ¿Podrías confirmarme tu RUT?",
   "¿Es tu primera vivienda? (Sí / No)",
@@ -103,66 +103,56 @@ const steps = [
   "¿Qué tipo de trabajador eres?\n1) Dependiente\n2) Independiente\n3) Socio Empresa",
 ];
 
+// --- Webhook WhatsApp ---
 app.post("/whatsapp-webhook", async (req, res) => {
   res.status(200).send("OK");
 
-  const from = req.body?.From;
-  const body = (req.body?.Body || "").trim();
-  const numMedia = parseInt(req.body?.NumMedia || "0");
-  const hasMedia = numMedia > 0;
+  const from = req.body.From;
+  const body = (req.body.Body || "").trim();
+  const numMedia = parseInt(req.body.NumMedia || "0");
 
   if (!from) return;
 
   if (!conversations[from]) {
-    conversations[from] = { step: 0, data: {}, history: [] };
+    conversations[from] = { step: 0, data: {}, receivedDocs: [] };
     await sendWhatsAppTemplate(from, "Cliente");
     return;
   }
 
   const convo = conversations[from];
-  convo.history.push({ role: "user", content: body });
-
   try {
-    // --- Paso 0: Primer mensaje después del template ---
     if (convo.step === 0) {
       convo.step = 1;
       await sendWhatsAppMessage(from, steps[0]);
       return;
     }
 
-    // --- Paso 1: RUT ---
     if (convo.step === 1) {
       convo.data.rut = body;
       convo.step = 2;
+      convo.itemId = await findOrCreateMondayItem(body); // 🔍 Vincula con Monday
       await sendWhatsAppMessage(from, steps[1]);
       return;
     }
 
-    // --- Paso 2: Primera vivienda ---
     if (convo.step === 2) {
-      convo.data.primera_vivienda = /^s/i.test(body) ? "Sí" : "No";
       convo.step = 3;
       await sendWhatsAppMessage(from, steps[2]);
       return;
     }
 
-    // --- Paso 3: Tipo de vivienda ---
     if (convo.step === 3) {
-      convo.data.tipo_vivienda = /casa/i.test(body) ? "Casa" : "Departamento";
       convo.step = 4;
       await sendWhatsAppMessage(from, steps[3]);
       return;
     }
 
-    // --- Paso 4: Precio UF ---
     if (convo.step === 4) {
-      convo.data.precio_uf = body;
       convo.step = 5;
       await sendWhatsAppMessage(from, steps[4]);
       return;
     }
 
-    // --- Paso 5: Tipo de trabajador ---
     if (convo.step === 5) {
       let tipo = "";
       if (/1|depend/i.test(body)) tipo = "dependiente";
@@ -180,33 +170,28 @@ app.post("/whatsapp-webhook", async (req, res) => {
       const docs = requiredDocs[tipo];
       await sendWhatsAppMessage(
         from,
-        `📄 Documentos requeridos (${tipo.charAt(0).toUpperCase() + tipo.slice(1)}):\n- ${docs.join(
-          "\n- "
-        )}\n\nPor favor envíalos aquí uno por uno o todos juntos.`
+        `📄 Documentos requeridos (${tipo}):\n- ${docs.join("\n- ")}\n\nPor favor envíalos aquí.`
       );
       return;
     }
 
-    // --- Paso 6: Recepción de documentos ---
-    if (convo.step === 6) {
-      if (hasMedia) {
-        convo.data.docs = (convo.data.docs || 0) + numMedia;
-        await sendWhatsAppMessage(from, "📎 Documento recibido. Gracias 🙌");
-      } else {
-        const aiReply = await askAI([
-          { role: "user", content: `El cliente dice: ${body}. Está en el paso de envío de documentos.` },
-        ]);
-        await sendWhatsAppMessage(from, aiReply);
+    if (convo.step === 6 && numMedia > 0) {
+      for (let i = 0; i < numMedia; i++) {
+        const mediaUrl = req.body[`MediaUrl${i}`];
+        await handleFileUpload(from, mediaUrl, convo.itemId);
       }
 
-      // Si ya envió al menos 3 archivos, cerrar conversación
-      if ((convo.data.docs || 0) >= 3) {
-        convo.step = 7;
+      convo.receivedDocs.push(...Array(numMedia).fill("ok"));
+
+      const expected = requiredDocs[convo.data.tipo_trabajador];
+      if (convo.receivedDocs.length >= expected.length) {
         await sendWhatsAppMessage(
           from,
           "✅ Gracias, todos los documentos fueron recibidos correctamente. Iniciaremos la evaluación crediticia. ¡Nos vemos! 👋"
         );
         delete conversations[from];
+      } else {
+        await sendWhatsAppMessage(from, "📎 Documento recibido. Si tienes más, envíalos a continuación.");
       }
     }
   } catch (err) {
@@ -214,6 +199,55 @@ app.post("/whatsapp-webhook", async (req, res) => {
   }
 });
 
-// --- INICIAR SERVIDOR ---
+// --- Buscar o crear item en Monday (por RUT) ---
+async function findOrCreateMondayItem(rut) {
+  const boardId = process.env.MONDAY_BOARD_ID;
+  const query = `
+    query {
+      items_page_by_column_values (board_id: ${boardId}, columns: [{column_id: "rut", column_value: "${rut}"}]) {
+        items { id name }
+      }
+    }`;
+
+  const response = await fetch("https://api.monday.com/v2", {
+    method: "POST",
+    headers: {
+      Authorization: MONDAY_API_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query }),
+  });
+
+  const data = await response.json();
+  const existing = data?.data?.items_page_by_column_values?.items?.[0];
+
+  if (existing) {
+    console.log("📋 Cliente encontrado:", existing.id);
+    return existing.id;
+  }
+
+  // Crear item si no existe
+  const mutation = `
+    mutation {
+      create_item (board_id: ${boardId}, item_name: "Cliente ${rut}", column_values: "{\\"rut\\": \\"${rut}\\"}") {
+        id
+      }
+    }`;
+
+  const createRes = await fetch("https://api.monday.com/v2", {
+    method: "POST",
+    headers: {
+      Authorization: MONDAY_API_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query: mutation }),
+  });
+
+  const newItem = await createRes.json();
+  console.log("🆕 Item creado:", newItem.data.create_item.id);
+  return newItem.data.create_item.id;
+}
+
+// --- Iniciar servidor ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 MarIA corriendo en puerto ${PORT}`));
