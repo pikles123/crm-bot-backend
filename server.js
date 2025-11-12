@@ -23,6 +23,9 @@ const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TO
 // --- ESTADO TEMPORAL DE CONVERSACIONES ---
 const conversations = {}; // key = "whatsapp:+569..." → { step: number, data: {...} }
 
+// --- ID DE TEMPLATE DE WHATSAPP APROBADO ---
+const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53"; // ⚠️ Reemplázalo con el SID real de Twilio
+
 // --- HELPERS ---
 function parseMondayPhoneColumn(col) {
   try {
@@ -38,15 +41,36 @@ function parseMondayPhoneColumn(col) {
   }
 }
 
-// --- FUNCION PARA ENVIAR MENSAJES ---
+// --- FUNCION: Enviar template inicial ---
+async function sendWhatsAppTemplate(to, nombre_cliente) {
+  try {
+    if (!WHATSAPP_TEMPLATE_SID) throw new Error("No se configuró el WHATSAPP_TEMPLATE_SID.");
+    console.log(`📤 Enviando mensaje de bienvenida con template a ${to}`);
+
+    const msg = await client.messages.create({
+      from: process.env.TWILIO_PHONE_NUMBER, // ejemplo: whatsapp:+14155238886
+      to,
+      contentSid: WHATSAPP_TEMPLATE_SID,
+      contentVariables: JSON.stringify({
+        "1": nombre_cliente || "cliente",
+      }),
+    });
+
+    console.log(`✅ Template enviado correctamente (SID: ${msg.sid})`);
+  } catch (err) {
+    console.error("❌ Error enviando template de WhatsApp:", err.message);
+  }
+}
+
+// --- FUNCION: Enviar mensajes normales ---
 async function sendWhatsAppMessage(to, body) {
   try {
     if (!process.env.TWILIO_PHONE_NUMBER) throw new Error("TWILIO_PHONE_NUMBER no está definido.");
     if (!to || !body) throw new Error(`Parámetros inválidos: to=${to}, body=${body}`);
 
-    console.log(`📤 Enviando WhatsApp a ${to}: "${body}"`);
+    console.log(`📤 Enviando mensaje WhatsApp a ${to}: "${body}"`);
     const msg = await client.messages.create({
-      from: process.env.TWILIO_PHONE_NUMBER, // Ej: whatsapp:+14155238886
+      from: process.env.TWILIO_PHONE_NUMBER,
       to,
       body,
     });
@@ -71,7 +95,6 @@ app.post("/monday-webhook", async (req, res) => {
   try {
     const event = req.body?.event;
     if (!event) throw new Error("No se recibió 'event' desde Monday.");
-
     const pulseId = event.pulseId;
     if (!pulseId) throw new Error("No se recibió 'pulseId' desde Monday.");
 
@@ -89,7 +112,6 @@ app.post("/monday-webhook", async (req, res) => {
         }
       }
     `;
-
     const mondayResp = await axios.post(
       "https://api.monday.com/v2",
       { query },
@@ -128,17 +150,13 @@ app.post("/monday-webhook", async (req, res) => {
     const to = `whatsapp:${telefonoClean}`;
     console.log("📱 Enviando mensaje inicial al número:", to);
 
-    // --- Crear conversación en estado inicial ---
+    // --- Crear conversación inicial ---
     conversations[to] = { step: 0, data: { nombre_cliente } };
 
-    // --- Solo mensaje de bienvenida ---
-    await sendWhatsAppMessage(
-      to,
-      `Holaa! 👋 
-Soy MarIA, tu asistente virtual de Uniflou. Te apoyaré en la gestión de tu Crédito Hipotecario.`
-    );
+    // --- Enviar mensaje con template aprobado ---
+    await sendWhatsAppTemplate(to, nombre_cliente);
 
-    console.log("✅ Mensaje inicial enviado. Esperando respuesta del cliente...");
+    console.log("✅ Template inicial enviado. Esperando respuesta del cliente...");
   } catch (error) {
     console.error("❌ Error procesando webhook de Monday:", error.message);
   }
@@ -254,4 +272,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
-
