@@ -90,9 +90,9 @@ const handleFileUpload = async (from, url, itemId) => {
 
 // --- DOCUMENTOS REQUERIDOS ---
 const requiredDocs = {
-  dependiente: ["liquidaciones", "cedula", "cotizaciones"],
-  independiente: ["cedula", "dai", "carpeta", "boletas"],
-  socio: ["cedula", "dai empresa", "dai personal", "balance", "carpeta", "cotizaciones", "liquidaciones"],
+  dependiente: ["3 últimas liquidaciones", "cedula", "cotizaciones AFP 12 meses","informe de deuda CMF"],
+  independiente: ["cedula", "dai", "carpeta", "boletas","informe de deuda CMF"],
+  socio: ["cedula", "dai empresa", "dai personal", "balance", "carpeta", "cotizaciones AFP 12 meses", "3 últimas liquidaciones","informe de deuda CMF"],
 };
 
 // --- FLUJO DE PREGUNTAS ---
@@ -310,3 +310,4 @@ async function findOrCreateMondayItem(rut) {
 // --- INICIAR SERVIDOR ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 MarIA corriendo en puerto ${PORT}`));
+
