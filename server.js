@@ -259,7 +259,7 @@ app.post("/monday-webhook", async (req, res) => {
     console.log(`📞 Teléfono encontrado: ${telefono}`);
 
     // Enviar template de WhatsApp
-    await sendWhatsAppTemplate(`whatsapp:${telefono}`, item.name || "Cliente");
+    await sendWhatsAppTemplate(`whatsapp:+${telefono}`, item.name || "Cliente");
     res.status(200).send("Mensaje enviado");
   } catch (err) {
     console.error("❌ Error procesando webhook de Monday:", err.message);
@@ -312,6 +312,7 @@ async function findOrCreateMondayItem(rut) {
 // --- INICIAR SERVIDOR ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 MarIA corriendo en puerto ${PORT}`));
+
 
 
 
