@@ -20,9 +20,11 @@ const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TO
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const MONDAY_API_KEY = process.env.MONDAY_API_KEY;
-const MONDAY_FILE_COLUMN_ID = process.env.MONDAY_FILE_COLUMN_ID || "archivos";
-const MONDAY_ITEM_ID_COLUMN = process.env.MONDAY_ITEM_ID_COLUMN || "phone_mkxkb8na";
-const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53"; // SID real
+const MONDAY_FILE_COLUMN_ID = process.env.MONDAY_FILE_COLUMN_ID || "file_mkxk75xt";
+const MONDAY_ITEM_ID_COLUMN = process.env.MONDAY_ITEM_ID_COLUMN || "phone_mkxkb8na"; // columna del teléfono
+const MONDAY_RUT_COLUMN_ID = "text_mkxkf0sn"; // columna del RUT
+const MONDAY_BOARD_ID = process.env.MONDAY_BOARD_ID;
+const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53";
 
 const conversations = {};
 
@@ -52,11 +54,12 @@ const sendWhatsAppTemplate = async (to, nombre_cliente) => {
 
 // --- SUBIDA DE ARCHIVOS A MONDAY ---
 const uploadToMonday = async (itemId, filePath, fileName) => {
-  const query = `mutation ($file: File!) {
-    add_file_to_column (item_id: ${itemId}, column_id: "${MONDAY_FILE_COLUMN_ID}", file: $file) {
-      id
-    }
-  }`;
+  const query = `
+    mutation ($file: File!) {
+      add_file_to_column (item_id: ${itemId}, column_id: "${MONDAY_FILE_COLUMN_ID}", file: $file) {
+        id
+      }
+    }`;
 
   const form = new FormData();
   form.append("query", query);
@@ -64,7 +67,7 @@ const uploadToMonday = async (itemId, filePath, fileName) => {
 
   const response = await fetch("https://api.monday.com/v2/file", {
     method: "POST",
-    headers: { Authorization: MONDAY_API_KEY },
+    headers: { "Authorization": MONDAY_API_KEY },
     body: form,
   });
 
@@ -79,7 +82,11 @@ const handleFileUpload = async (from, url, itemId) => {
 
   const response = await axios.get(url, {
     responseType: "arraybuffer",
-    headers: { Authorization: `Basic ${Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString("base64")}` },
+    headers: {
+      Authorization: `Basic ${Buffer.from(
+        `${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`
+      ).toString("base64")}`,
+    },
   });
 
   fs.writeFileSync(localPath, response.data);
@@ -92,9 +99,18 @@ const handleFileUpload = async (from, url, itemId) => {
 
 // --- DOCUMENTOS REQUERIDOS ---
 const requiredDocs = {
-  dependiente: ["3 últimas liquidaciones", "cedula", "cotizaciones AFP 12 meses","informe de deuda CMF"],
-  independiente: ["cedula", "dai", "carpeta", "boletas","informe de deuda CMF"],
-  socio: ["cedula", "dai empresa", "dai personal", "balance", "carpeta", "cotizaciones AFP 12 meses", "3 últimas liquidaciones","informe de deuda CMF"],
+  dependiente: ["3 últimas liquidaciones", "cedula", "cotizaciones AFP 12 meses", "informe de deuda CMF"],
+  independiente: ["cedula", "dai", "carpeta", "boletas", "informe de deuda CMF"],
+  socio: [
+    "cedula",
+    "dai empresa",
+    "dai personal",
+    "balance",
+    "carpeta",
+    "cotizaciones AFP 12 meses",
+    "3 últimas liquidaciones",
+    "informe de deuda CMF",
+  ],
 };
 
 // --- FLUJO DE PREGUNTAS ---
@@ -113,7 +129,6 @@ app.post("/whatsapp-webhook", async (req, res) => {
   const from = req.body.From;
   const body = (req.body.Body || "").trim();
   const numMedia = parseInt(req.body.NumMedia || "0");
-
   if (!from) return;
 
   if (!conversations[from]) {
@@ -132,8 +147,8 @@ app.post("/whatsapp-webhook", async (req, res) => {
 
     if (convo.step === 1) {
       convo.data.rut = body;
-      convo.step = 2;
       convo.itemId = await findOrCreateMondayItem(body);
+      convo.step = 2;
       await sendWhatsAppMessage(from, steps[1]);
       return;
     }
@@ -213,19 +228,19 @@ app.post("/monday-webhook", async (req, res) => {
   console.log(`🧭 Evento de Monday para item ${itemId} (${event.pulseName})`);
 
   try {
-    // Obtener datos del item desde Monday
-    const query = `query {
-      items (ids: [${itemId}]) {
-        id
-        name
-        column_values { id title value text }
-      }
-    }`;
+    const query = `
+      query {
+        items (ids: [${itemId}]) {
+          id
+          name
+          column_values { id text value type }
+        }
+      }`;
 
     const response = await fetch("https://api.monday.com/v2", {
       method: "POST",
       headers: {
-        Authorization: MONDAY_API_KEY,
+        "Authorization": MONDAY_API_KEY,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ query }),
@@ -269,17 +284,22 @@ app.post("/monday-webhook", async (req, res) => {
 
 // --- BUSCAR O CREAR ITEM EN MONDAY ---
 async function findOrCreateMondayItem(rut) {
-  const boardId = process.env.MONDAY_BOARD_ID;
   const query = `
     query {
-      items_page_by_column_values (board_id: ${boardId}, columns: [{column_id: "rut", column_value: "${rut}"}]) {
+      items_page_by_column_values (
+        board_id: ${MONDAY_BOARD_ID},
+        columns: [{column_id: "${MONDAY_RUT_COLUMN_ID}", column_value: "${rut}"}]
+      ) {
         items { id name }
       }
     }`;
 
   const response = await fetch("https://api.monday.com/v2", {
     method: "POST",
-    headers: { Authorization: MONDAY_API_KEY, "Content-Type": "application/json" },
+    headers: {
+      "Authorization": MONDAY_API_KEY,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({ query }),
   });
 
@@ -293,14 +313,21 @@ async function findOrCreateMondayItem(rut) {
 
   const mutation = `
     mutation {
-      create_item (board_id: ${boardId}, item_name: "Cliente ${rut}", column_values: "{\\"rut\\": \\"${rut}\\"}") {
+      create_item (
+        board_id: ${MONDAY_BOARD_ID},
+        item_name: "Cliente ${rut}",
+        column_values: "{\\"${MONDAY_RUT_COLUMN_ID}\\": \\"${rut}\\"}"
+      ) {
         id
       }
     }`;
 
   const createRes = await fetch("https://api.monday.com/v2", {
     method: "POST",
-    headers: { Authorization: MONDAY_API_KEY, "Content-Type": "application/json" },
+    headers: {
+      "Authorization": MONDAY_API_KEY,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({ query: mutation }),
   });
 
@@ -312,7 +339,3 @@ async function findOrCreateMondayItem(rut) {
 // --- INICIAR SERVIDOR ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 MarIA corriendo en puerto ${PORT}`));
-
-
-
-
