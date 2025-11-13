@@ -10,6 +10,8 @@ import OpenAI from "openai";
 
 dotenv.config();
 
+console.log("🔑 MONDAY_API_KEY:", process.env.MONDAY_API_KEY ? "OK (existe)" : "❌ NO CARGÓ");
+
 const app = express();
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -310,5 +312,6 @@ async function findOrCreateMondayItem(rut) {
 // --- INICIAR SERVIDOR ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 MarIA corriendo en puerto ${PORT}`));
+
 
 
