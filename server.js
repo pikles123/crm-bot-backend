@@ -21,8 +21,8 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const MONDAY_API_KEY = process.env.MONDAY_API_KEY;
 const MONDAY_FILE_COLUMN_ID = process.env.MONDAY_FILE_COLUMN_ID || "file_mkxk75xt";
-const MONDAY_PHONE_COLUMN_ID = process.env.MONDAY_ITEM_ID_COLUMN || "phone_mkxkb8na"; // teléfono
-const MONDAY_RUT_COLUMN_ID = "text_mkxkf0sn"; // columna RUT
+const MONDAY_PHONE_COLUMN_ID = process.env.MONDAY_ITEM_ID_COLUMN || "phone_mkxkb8na";
+const MONDAY_RUT_COLUMN_ID = "text_mkxkf0sn";
 const MONDAY_BOARD_ID = process.env.MONDAY_BOARD_ID;
 const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53";
 
@@ -57,6 +57,8 @@ function normalizeRut(rut) {
   return rut.replace(/[.\-]/g, "").toUpperCase();
 }
 
+// ---------------- MONDAY ----------------
+
 // Buscar si el RUT existe; si no, pedir nombre
 async function findOrCreateMondayItem(from, rut) {
   const cleanRut = normalizeRut(rut);
@@ -77,16 +79,24 @@ async function findOrCreateMondayItem(from, rut) {
 
   const response = await fetch("https://api.monday.com/v2", {
     method: "POST",
-    headers: { "Authorization": MONDAY_API_KEY, "Content-Type": "application/json" },
+    headers: {
+      Authorization: MONDAY_API_KEY,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({ query }),
   });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("❌ Error HTTP al buscar en Monday:", response.status, errText);
+    throw new Error(`Monday API error: ${response.status}`);
+  }
 
   const data = await response.json();
   const items = data?.data?.boards?.[0]?.items_page?.items || [];
 
-  // Buscar coincidencia exacta
-  const existing = items.find(item => {
-    const rutCol = item.column_values.find(c => c.id === MONDAY_RUT_COLUMN_ID);
+  const existing = items.find((item) => {
+    const rutCol = item.column_values.find((c) => c.id === MONDAY_RUT_COLUMN_ID);
     return rutCol?.text && normalizeRut(rutCol.text) === cleanRut;
   });
 
@@ -102,7 +112,48 @@ async function findOrCreateMondayItem(from, rut) {
   return { id: null, nuevo: true };
 }
 
-// ---------------- MONDAY FILE UPLOAD ----------------
+// Crear nuevo item
+async function createMondayItem(nombre, rut, telefono) {
+  const mutation = `
+    mutation($values: JSON!) {
+      create_item(
+        board_id: ${MONDAY_BOARD_ID},
+        item_name: "${nombre}",
+        column_values: $values
+      ) {
+        id
+      }
+    }`;
+
+  const variables = {
+    values: JSON.stringify({
+      [MONDAY_RUT_COLUMN_ID]: rut,
+      [MONDAY_PHONE_COLUMN_ID]: telefono,
+    }),
+  };
+
+  const response = await fetch("https://api.monday.com/v2", {
+    method: "POST",
+    headers: {
+      Authorization: MONDAY_API_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query: mutation, variables }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("❌ Error HTTP al crear item:", response.status, errText);
+    throw new Error(`Monday API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const newId = data?.data?.create_item?.id;
+  console.log("🆕 Nuevo cliente creado:", newId);
+  return newId;
+}
+
+// Subida de archivos
 const uploadToMonday = async (itemId, filePath, fileName) => {
   const query = `
     mutation ($file: File!) {
@@ -110,15 +161,25 @@ const uploadToMonday = async (itemId, filePath, fileName) => {
         id
       }
     }`;
+
   const form = new FormData();
   form.append("query", query);
   form.append("variables[file]", fs.createReadStream(filePath));
 
   const response = await fetch("https://api.monday.com/v2/file", {
     method: "POST",
-    headers: { Authorization: MONDAY_API_KEY },
+    headers: {
+      Authorization: MONDAY_API_KEY,
+      ...form.getHeaders(),
+    },
     body: form,
   });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error("❌ Error HTTP al subir archivo a Monday:", response.status, errText);
+    throw new Error(`Monday API error: ${response.status}`);
+  }
 
   const result = await response.json();
   console.log("📤 Subida a Monday:", result);
@@ -184,60 +245,38 @@ app.post("/whatsapp-webhook", async (req, res) => {
 
   const convo = conversations[from];
   try {
-    // Paso inicial
     if (convo.step === 0) {
       convo.step = 1;
       await sendWhatsAppMessage(from, steps[0]);
       return;
     }
 
-    // Paso 1: pedir y verificar RUT
     if (convo.step === 1) {
       convo.data.rut = body;
       const result = await findOrCreateMondayItem(from, body);
-      if (result.nuevo) return; // espera el nombre
+      if (result.nuevo) return;
       convo.itemId = result.id;
       convo.step = 2;
       await sendWhatsAppMessage(from, steps[1]);
       return;
     }
 
-    // Si estamos esperando nombre
     if (convo.step === "ask_name") {
       const nombre = body.trim();
-      convo.data.nombre = nombre;
       const rut = convo.pendingRut;
       const telefono = from.replace("whatsapp:", "");
 
-      const mutation = `
-        mutation {
-          create_item (
-            board_id: ${MONDAY_BOARD_ID},
-            item_name: "${nombre}",
-            column_values: "{\\"${MONDAY_RUT_COLUMN_ID}\\": \\"${rut}\\", \\"${MONDAY_PHONE_COLUMN_ID}\\": \\"${telefono}\\"}"
-          ) {
-            id
-          }
-        }`;
+      const newId = await createMondayItem(nombre, rut, telefono);
 
-      const response = await fetch("https://api.monday.com/v2", {
-        method: "POST",
-        headers: { "Authorization": MONDAY_API_KEY, "Content-Type": "application/json" },
-        body: JSON.stringify({ query: mutation }),
-      });
-
-      const data = await response.json();
-      const newId = data?.data?.create_item?.id;
-      console.log("🆕 Nuevo cliente creado:", newId);
-
+      convo.data.nombre = nombre;
       convo.itemId = newId;
       convo.step = 2;
+
       await sendWhatsAppMessage(from, `Gracias ${nombre} 🙌. Continuemos con tu proceso.`);
       await sendWhatsAppMessage(from, steps[1]);
       return;
     }
 
-    // Resto del flujo (pasos 2 en adelante)
     if (convo.step === 2) {
       convo.step = 3;
       await sendWhatsAppMessage(from, steps[2]);
@@ -300,6 +339,12 @@ app.post("/whatsapp-webhook", async (req, res) => {
   } catch (err) {
     console.error("❌ Error en webhook Twilio:", err.message);
   }
+});
+
+// ---------------- WEBHOOK DE MONDAY ----------------
+app.post("/monday-webhook", async (req, res) => {
+  console.log("📩 Webhook recibido desde Monday:", JSON.stringify(req.body, null, 2));
+  res.status(200).send("OK");
 });
 
 // ---------------- SERVIDOR ----------------
