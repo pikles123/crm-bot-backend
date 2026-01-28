@@ -28,7 +28,7 @@ const MONDAY_FILE_COLUMN_ID = process.env.MONDAY_FILE_COLUMN_ID || "file_mkxk75x
 const MONDAY_ITEM_ID_COLUMN = process.env.MONDAY_ITEM_ID_COLUMN || "phone_mkxkb8na";
 const MONDAY_RUT_COLUMN_ID = "text_mkxkf0sn";
 const MONDAY_BOARD_ID = process.env.MONDAY_BOARD_ID;
-const WHATSAPP_TEMPLATE_SID = "HX66fce12d7c4708fbe29bf356bc539a53";
+const WHATSAPP_TEMPLATE_SID = "HX5f264ef031cf6a87efcc9114e68e0051";
 
 const conversations = {};
 
@@ -355,3 +355,4 @@ async function findOrCreateMondayItem(rut) {
 // --- INICIAR SERVIDOR ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 MarIA corriendo en puerto ${PORT}`));
+
